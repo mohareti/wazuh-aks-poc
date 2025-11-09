@@ -1,0 +1,256 @@
+# Wazuh on AKS - Complete Deployment Manifest (POV)
+# This includes Wazuh Manager, Indexer, and Dashboard
+
+---
+# Wazuh Master StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wazuh-master
+  namespace: wazuh
+  labels:
+    app: wazuh
+    component: master
+spec:
+  serviceName: wazuh-master-svc
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wazuh
+      component: master
+  template:
+    metadata:
+      labels:
+        app: wazuh
+        component: master
+    spec:
+      containers:
+      - name: wazuh-master
+        image: wazuh/wazuh:4.7.0
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1
+            memory: 2Gi
+        ports:
+        - name: api
+          containerPort: 55000
+        - name: cluster
+          containerPort: 1514
+        volumeMounts:
+        - name: wazuh-master-data
+          mountPath: /var/ossec/data
+        - name: wazuh-master-config
+          mountPath: /wazuh-config-mount/etc/ossec.conf
+          subPath: ossec.conf
+        env:
+        - name: INDEXER_URL
+          value: "https://wazuh-indexer-0.wazuh-indexer-svc:9200"
+        - name: INDEXER_USERNAME
+          value: "admin"
+        - name: INDEXER_PASSWORD
+          value: "SecurePassword123!"
+        - name: FILEBEAT_SSL_VERIFICATION_MODE
+          value: "full"
+        - name: SSL_CERTIFICATE_AUTHORITIES
+          value: "/etc/ssl/certs/ca-certificate.crt"
+        - name: SSL_CERTIFICATE
+          value: "/etc/ssl/certs/node.crt"
+        - name: SSL_KEY
+          value: "/etc/ssl/certs/node.key"
+      volumeClaimTemplates:
+      - metadata:
+          name: wazuh-master-data
+        spec:
+          accessModes: [ "ReadWriteOnce" ]
+          storageClassName: wazuh-storage
+          resources:
+            requests:
+              storage: 20Gi
+
+---
+# Wazuh Master Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-master-svc
+  namespace: wazuh
+  labels:
+    app: wazuh
+spec:
+  type: ClusterIP
+  selector:
+    app: wazuh
+    component: master
+  ports:
+  - name: api
+    port: 55000
+    targetPort: 55000
+  - name: cluster
+    port: 1514
+    targetPort: 1514
+
+---
+# Opensearch Indexer StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wazuh-indexer
+  namespace: wazuh
+  labels:
+    app: wazuh
+    component: indexer
+spec:
+  serviceName: wazuh-indexer-svc
+  replicas: 3
+  selector:
+    matchLabels:
+      app: wazuh
+      component: indexer
+  template:
+    metadata:
+      labels:
+        app: wazuh
+        component: indexer
+    spec:
+      containers:
+      - name: wazuh-indexer
+        image: opensearchproject/opensearch:2.12.0
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1
+            memory: 2Gi
+        ports:
+        - name: http
+          containerPort: 9200
+        - name: node
+          containerPort: 9300
+        volumeMounts:
+        - name: wazuh-indexer-data
+          mountPath: /usr/share/opensearch/data
+        env:
+        - name: OPENSEARCH_INITIAL_ADMIN_PASSWORD
+          value: "SecurePassword123!"
+        - name: cluster.name
+          value: "wazuh-indexer-cluster"
+        - name: node.name
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: discovery.type
+          value: "multi-node"
+        - name: DISABLE_SECURITY_PLUGIN
+          value: "false"
+      volumeClaimTemplates:
+      - metadata:
+          name: wazuh-indexer-data
+        spec:
+          accessModes: [ "ReadWriteOnce" ]
+          storageClassName: wazuh-storage
+          resources:
+            requests:
+              storage: 50Gi
+
+---
+# Opensearch Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-indexer-svc
+  namespace: wazuh
+  labels:
+    app: wazuh
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: wazuh
+    component: indexer
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
+  - name: node-comm
+    port: 9300
+    targetPort: 9300
+
+---
+# Wazuh Dashboard Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wazuh-dashboard
+  namespace: wazuh
+  labels:
+    app: wazuh
+    component: dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wazuh
+      component: dashboard
+  template:
+    metadata:
+      labels:
+        app: wazuh
+        component: dashboard
+    spec:
+      containers:
+      - name: wazuh-dashboard
+        image: wazuh/wazuh-dashboard:4.7.0
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        ports:
+        - name: http
+          containerPort: 5601
+        env:
+        - name: OPENSEARCH_HOSTS
+          value: "https://wazuh-indexer-0.wazuh-indexer-svc:9200"
+        - name: OPENSEARCH_USERNAME
+          value: "admin"
+        - name: OPENSEARCH_PASSWORD
+          value: "SecurePassword123!"
+        - name: SERVER_SSL_ENABLED
+          value: "false"
+        livenessProbe:
+          httpGet:
+            path: /api/status
+            port: 5601
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/status
+            port: 5601
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+# Wazuh Dashboard Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-dashboard
+  namespace: wazuh
+  labels:
+    app: wazuh
+spec:
+  type: ClusterIP
+  selector:
+    app: wazuh
+    component: dashboard
+  ports:
+  - name: http
+    port: 5601
+    targetPort: 5601
